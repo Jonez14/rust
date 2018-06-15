@@ -1,20 +1,13 @@
-error[E0080]: referenced constant
-  --> $DIR/issue-50814-2.rs:26:5
+error[E0597]: borrowed value does not live long enough
+  --> $DIR/issue-50814-2.rs:26:6
    |
-LL |     const BAR: usize = [5, 6, 7][T::BOO];
-   |                        ----------------- index out of bounds: the len is 3 but the index is 42
-...
-LL |     &<A<T> as Foo<T>>::BAR //~ ERROR erroneous constant used
-   |     ^^^^^^^^^^^^^^^^^^^^^^
-
-error[E0080]: erroneous constant used
-  --> $DIR/issue-50814-2.rs:26:5
+LL |     &<A<T> as Foo<T>>::BAR //~ ERROR borrowed value does not live long enough
+   |      ^^^^^^^^^^^^^^^^^^^^^ temporary value does not live long enough
+LL | }
+   | - temporary value only lives until here
    |
-LL |     &<A<T> as Foo<T>>::BAR //~ ERROR erroneous constant used
-   |     ^---------------------
-   |      |
-   |      referenced constant has errors
+   = note: borrowed value must be valid for the static lifetime...
 
-error: aborting due to 2 previous errors
+error: aborting due to previous error
 
-For more information about this error, try `rustc --explain E0080`.
+For more information about this error, try `rustc --explain E0597`.
