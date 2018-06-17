@@ -881,7 +881,12 @@ impl<'a, 'b: 'a, 'tcx: 'b> IsolatedEncoder<'a, 'b, 'tcx> {
         !self.tcx.sess.opts.output_types.should_codegen()
     }
 
-    fn const_fn_qualif(&self, def_id: DefId, body_id: hir::BodyId, span: Span) -> Option<ConstQualif> {
+    fn const_fn_qualif(
+        &self,
+        def_id: DefId,
+        body_id: hir::BodyId,
+        span: Span,
+    ) -> Option<ConstQualif> {
         if self.tcx.is_const_fn(def_id) {
             let mir = self.tcx.at(span).mir_const_qualif(def_id).0;
             Some(self.const_qualif(mir, body_id))
