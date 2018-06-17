@@ -434,9 +434,10 @@ pub struct FnData<'tcx> {
     pub constness: hir::Constness,
     pub arg_names: LazySeq<ast::Name>,
     pub sig: Lazy<ty::PolyFnSig<'tcx>>,
+    pub qualif: Option<ConstQualif>,
 }
 
-impl_stable_hash_for!(struct FnData<'tcx> { constness, arg_names, sig });
+impl_stable_hash_for!(struct FnData<'tcx> { constness, arg_names, sig, qualif });
 
 #[derive(RustcEncodable, RustcDecodable)]
 pub struct VariantData<'tcx> {

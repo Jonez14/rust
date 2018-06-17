@@ -49,6 +49,11 @@ impl<T> Steal<T> {
         })
     }
 
+    /// In case of cyclic queries, use this function to break the cycle
+    pub fn try_borrow(&self) -> ReadGuard<Option<T>> {
+        self.value.borrow()
+    }
+
     pub fn steal(&self) -> T {
         let value_ref = &mut *self.value.try_write().expect("stealing value which is locked");
         let value = mem::replace(value_ref, None);
