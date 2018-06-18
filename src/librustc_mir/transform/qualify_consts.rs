@@ -1410,12 +1410,13 @@ impl<'a, 'tcx> PromotableConstFn<'a, 'tcx> {
         kind: &TerminatorKind<'tcx>,
     ) -> bool {
         match kind {
-            TerminatorKind::Call { ref func, .. } => {
+            TerminatorKind::Call { ref func, ref args, destination: Some((dest, _)), .. } => {
                 let fn_ty = func.ty(mir, self.tcx);
                 if let ty::TyFnDef(def_id, _) = fn_ty.sty {
                     if self.tcx.is_const_fn(def_id) {
                         self.check_later(def_id);
-                        true
+                        args.iter().all(|op| self.check_operand(mir, op)) &&
+                            self.check_place(mir, dest)
                     } else {
                         false
                     }
@@ -1426,10 +1427,6 @@ impl<'a, 'tcx> PromotableConstFn<'a, 'tcx> {
             // trivial constrol flow
             TerminatorKind::Goto { .. } |
             TerminatorKind::Return => true,
-            // currently disallowed
-            TerminatorKind::SwitchInt { .. } => false,
-            // assertions are fine, they are essentially "goto or abort"
-            TerminatorKind::Assert { cond, .. } => self.check_operand(mir, cond),
             // everything else is not promotable
             _ => false,
         }
@@ -1493,22 +1490,23 @@ impl<'a, 'tcx> PromotableConstFn<'a, 'tcx> {
         match rvalue {
             | Rvalue::Use(op)
             | Rvalue::Repeat(op, _)
-            | Rvalue::UnaryOp(_, op)
             => self.check_operand(mir, op),
 
             Rvalue::NullaryOp(..) => true,
 
-            | Rvalue::Len(place)
-            | Rvalue::Discriminant(place)
+            // disallow anything that processes the bits of a value
+            | Rvalue::UnaryOp(_, _)
+            | Rvalue::Len(_)
+            | Rvalue::Discriminant(_)
+            | Rvalue::BinaryOp(_, _, _)
+            | Rvalue::CheckedBinaryOp(_, _, _)
+            => false,
+
             | Rvalue::Ref(_, _, place)
             => self.check_place(mir, place),
 
             | Rvalue::Aggregate(_, operands)
             => operands.iter().any(|op| self.check_operand(mir, op)),
-
-            | Rvalue::BinaryOp(_, a, b)
-            | Rvalue::CheckedBinaryOp(_, a, b)
-            => self.check_operand(mir, a) && self.check_operand(mir, b),
 
             | Rvalue::Cast(CastKind::ReifyFnPointer, op, _)
             | Rvalue::Cast(CastKind::UnsafeFnPointer, op, _)
