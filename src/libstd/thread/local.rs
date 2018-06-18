@@ -194,7 +194,7 @@ macro_rules! __thread_local_inner {
         }
     };
     ($(#[$attr:meta])* $vis:vis $name:ident, $t:ty, $init:expr) => {
-        $(#[$attr])* $vis const $name: $crate::thread::LocalKey<$t> =
+        $(#[$attr])* $vis static $name: $crate::thread::LocalKey<$t> =
             __thread_local_inner!(@key $(#[$attr])* $vis $name, $t, $init);
     }
 }
@@ -243,7 +243,7 @@ impl<T: 'static> LocalKey<T> {
     /// destructor running, and it **may** panic if the destructor has
     /// previously been run for this thread.
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn with<F, R>(&self, f: F) -> R
+    pub fn with<F, R>(&'static self, f: F) -> R
                       where F: FnOnce(&T) -> R {
         self.try_with(f).expect("cannot access a TLS value during or \
                                  after it is destroyed")
@@ -283,7 +283,7 @@ impl<T: 'static> LocalKey<T> {
     /// This function will still `panic!()` if the key is uninitialized and the
     /// key's initializer panics.
     #[stable(feature = "thread_local_try_with", since = "1.26.0")]
-    pub fn try_with<F, R>(&self, f: F) -> Result<R, AccessError>
+    pub fn try_with<F, R>(&'static self, f: F) -> Result<R, AccessError>
     where
         F: FnOnce(&T) -> R,
     {

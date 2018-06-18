@@ -670,7 +670,7 @@ pub fn set_print(sink: Option<Box<Write + Send>>) -> Option<Box<Write + Send>> {
 /// However, if the actual I/O causes an error, this function does panic.
 fn print_to<T>(
     args: fmt::Arguments,
-    local_s: &LocalKey<RefCell<Option<Box<Write+Send>>>>,
+    local_s: &'static LocalKey<RefCell<Option<Box<Write+Send>>>>,
     global_s: fn() -> T,
     label: &str,
 )

@@ -935,6 +935,7 @@ This does not pose a problem by itself because they can't be accessed directly."
                             | "cttz_nonzero"
                             | "ctlz"
                             | "ctlz_nonzero" => {
+                                self.add(Qualif::NOT_PROMOTABLE);
                                 is_const_fn = Some(def_id)
                             },
 
