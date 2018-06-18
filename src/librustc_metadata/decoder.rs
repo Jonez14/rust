@@ -415,9 +415,9 @@ impl<'tcx> EntryKind<'tcx> {
             EntryKind::ForeignMutStatic => Def::Static(did, true),
             EntryKind::Struct(_, _) => Def::Struct(did),
             EntryKind::Union(_, _) => Def::Union(did),
-            EntryKind::Fn(_) |
+            EntryKind::Fn(..) |
             EntryKind::ForeignFn(_) => Def::Fn(did),
-            EntryKind::Method(_) => Def::Method(did),
+            EntryKind::Method(..) => Def::Method(did),
             EntryKind::Type => Def::TyAlias(did),
             EntryKind::AssociatedType(_) => Def::AssociatedTy(did),
             EntryKind::Mod(_) => Def::Mod(did),
@@ -765,7 +765,13 @@ impl<'a, 'tcx> CrateMetadata {
         match self.entry(id).kind {
             EntryKind::AssociatedConst(_, data, _) |
             EntryKind::Const(data, _) => data.ast_promotable,
-            _ => bug!(),
+            EntryKind::Fn(ref data) => {
+                data.decode(self).qualif.map_or(false, |q| q.ast_promotable)
+            },
+            EntryKind::Method(ref data) => {
+                data.decode(self).fn_data.qualif.map_or(false, |q| q.ast_promotable)
+            },
+            _ => bug!("{:?}", id),
         }
     }
 
@@ -791,6 +797,8 @@ impl<'a, 'tcx> CrateMetadata {
             EntryKind::AssociatedConst(AssociatedContainer::ImplFinal, qualif, _) => {
                 qualif.mir
             }
+            EntryKind::Method(data) => data.decode(self).fn_data.qualif.map_or(0, |q| q.mir),
+            EntryKind::Fn(data) => data.decode(self).qualif.map_or(0, |q| q.mir),
             _ => bug!(),
         }
     }

@@ -27,14 +27,13 @@
 use rustc::ty::cast::CastKind;
 use rustc::hir::def::{Def, CtorKind};
 use rustc::hir::def_id::DefId;
-use rustc::hir::map::blocks::FnLikeNode;
 use rustc::middle::expr_use_visitor as euv;
 use rustc::middle::mem_categorization as mc;
 use rustc::middle::mem_categorization::Categorization;
 use rustc::ty::{self, Ty, TyCtxt};
 use rustc::ty::query::Providers;
 use rustc::ty::subst::Substs;
-use rustc::util::nodemap::{ItemLocalSet, NodeSet};
+use rustc::util::nodemap::{ItemLocalSet, NodeSet, FxHashSet};
 use rustc::hir;
 use rustc_data_structures::sync::Lrc;
 use syntax::ast;
@@ -75,6 +74,14 @@ fn rvalue_promotable_map<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                                    def_id: DefId)
                                    -> Lrc<ItemLocalSet>
 {
+    rvalue_promotable_map_inner(tcx, def_id, &mut FxHashSet())
+}
+
+fn rvalue_promotable_map_inner<'a, 'tcx>(
+    tcx: TyCtxt<'a, 'tcx, 'tcx>,
+    def_id: DefId,
+    seen: &mut FxHashSet<DefId>,
+) -> Lrc<ItemLocalSet> {
     let outer_def_id = tcx.closure_base_def_id(def_id);
     if outer_def_id != def_id {
         return tcx.rvalue_promotable_map(outer_def_id);
@@ -90,7 +97,10 @@ fn rvalue_promotable_map<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         param_env: ty::ParamEnv::empty(),
         identity_substs: Substs::empty(),
         result: ItemLocalSet(),
+        seen,
     };
+
+    visitor.seen.insert(def_id);
 
     // `def_id` should be a `Body` owner
     let node_id = tcx.hir.as_local_node_id(def_id)
@@ -111,6 +121,7 @@ struct CheckCrateVisitor<'a, 'tcx: 'a> {
     identity_substs: &'tcx Substs<'tcx>,
     tables: &'a ty::TypeckTables<'tcx>,
     result: ItemLocalSet,
+    seen: &'a mut FxHashSet<DefId>,
 }
 
 impl<'a, 'gcx> CheckCrateVisitor<'a, 'gcx> {
@@ -122,14 +133,6 @@ impl<'a, 'gcx> CheckCrateVisitor<'a, 'gcx> {
 
     fn handle_const_fn_call(&mut self, def_id: DefId, ret_ty: Ty<'gcx>, span: Span) {
         self.promotable &= self.type_has_only_promotable_values(ret_ty);
-
-        self.promotable &= if let Some(fn_id) = self.tcx.hir.as_local_node_id(def_id) {
-            FnLikeNode::from_node(self.tcx.hir.get(fn_id)).map_or(false, |fn_like| {
-                fn_like.constness() == hir::Constness::Const
-            })
-        } else {
-            self.tcx.is_const_fn(def_id)
-        };
 
         if let Some(&attr::Stability {
             rustc_const_unstable: Some(attr::RustcConstUnstable {
@@ -148,6 +151,28 @@ impl<'a, 'gcx> CheckCrateVisitor<'a, 'gcx> {
 
                 // this comes from a macro that has #[allow_internal_unstable]
                 span.allows_unstable();
+        }
+
+
+        let is_const_fn = self.tcx.is_const_fn(def_id);
+        self.promotable &= is_const_fn;
+        if is_const_fn {
+            if def_id.is_local() {
+                // Prevent cycles in checking `const_is_rvalue_promotable_to_static`
+                if self.seen.insert(def_id) {
+                    let sub_map = rvalue_promotable_map_inner(self.tcx, def_id, self.seen);
+                    let node_id = self
+                        .tcx
+                        .hir
+                        .as_local_node_id(def_id)
+                        .expect("rvalue_promotable_map invoked with non-local def-id");
+                    let hir_id = self.tcx.hir.node_to_hir_id(node_id);
+                    self.promotable &= sub_map.contains(&hir_id.local_id);
+                }
+            } else {
+                // dependencies are already cached
+                self.promotable &= self.tcx.at(span).const_is_rvalue_promotable_to_static(def_id);
+            }
         }
     }
 
@@ -267,7 +292,7 @@ impl<'a, 'tcx> Visitor<'tcx> for CheckCrateVisitor<'a, 'tcx> {
         }
 
         if self.promotable {
-            self.result.insert(ex.hir_id.local_id);
+            assert!(self.result.insert(ex.hir_id.local_id));
         }
         self.promotable &= outer;
     }
@@ -361,17 +386,14 @@ fn check_expr<'a, 'tcx>(v: &mut CheckCrateVisitor<'a, 'tcx>, e: &hir::Expr, node
 
                 Def::Const(did) |
                 Def::AssociatedConst(did) => {
-                    let promotable = if v.tcx.trait_of_item(did).is_some() {
+                    if v.tcx.trait_of_item(did).is_some() {
                         // Don't peek inside trait associated constants.
-                        false
+                        v.promotable = false;
                     } else {
-                        v.tcx.at(e.span).const_is_rvalue_promotable_to_static(did)
-                    };
-
-                    // Just in case the type is more specific than the definition,
-                    // e.g. impl associated const with type parameters, check it.
-                    // Also, trait associated consts are relaxed by this.
-                    v.promotable &= promotable || v.type_has_only_promotable_values(node_ty);
+                        // Just in case the type is more specific than the definition,
+                        // e.g. impl associated const with type parameters, check it.
+                        v.promotable &= v.tcx.at(e.span).const_is_rvalue_promotable_to_static(did);
+                    }
                 }
 
                 _ => {

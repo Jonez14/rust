@@ -566,14 +566,15 @@ impl<'a, 'tcx> Visitor<'tcx> for Qualifier<'a, 'tcx, 'tcx> {
 
                         ProjectionElem::Field(..) |
                         ProjectionElem::Index(_) => {
-                            if this.mode == Mode::Fn {
-                                let base_ty = proj.base.ty(this.mir, this.tcx).to_ty(this.tcx);
-                                if let Some(def) = base_ty.ty_adt_def() {
-                                    if def.is_union() {
-                                        this.not_const();
-                                    }
+                            let base_ty = proj.base.ty(this.mir, this.tcx).to_ty(this.tcx);
+                            // accessing union fields is never allowed inside promoteds
+                            if let Some(def) = base_ty.ty_adt_def() {
+                                if def.is_union() {
+                                    this.add(Qualif::NOT_PROMOTABLE);
                                 }
-                            } else if this.qualif.intersects(Qualif::STATIC) {
+                            }
+                            // Only functions may refer to statics directly
+                            if this.mode != Mode::Fn && this.qualif.intersects(Qualif::STATIC) {
                                 span_err!(this.tcx.sess, this.span, E0494,
                                           "cannot refer to the interior of another \
                                            static, use a constant instead");
@@ -615,6 +616,7 @@ impl<'a, 'tcx> Visitor<'tcx> for Qualifier<'a, 'tcx, 'tcx> {
                 } = constant.literal {
                     // Don't peek inside trait associated constants.
                     if self.tcx.trait_of_item(def_id).is_some() {
+                        self.add(Qualif::NOT_PROMOTABLE);
                         self.add_type(ty);
                     } else {
                         let (bits, _) = self.tcx.at(constant.span).mir_const_qualif(def_id);
@@ -913,15 +915,29 @@ This does not pose a problem by itself because they can't be accessed directly."
                     Abi::PlatformIntrinsic => {
                         assert!(!self.tcx.is_const_fn(def_id));
                         match &self.tcx.item_name(def_id).as_str()[..] {
+                            // DANGER_ZONE
+                            // Do not add anything to this list without consulting
+                            // @eddyb, @nikomatsakis and @oli-obk
+                            //
+                            // Any intrinsic which has arguments can potentially cause
+                            // a mismatch between what becomes promoted to `'static` and
+                            // what can be evaluated at compile-time
                             | "size_of"
                             | "min_align_of"
-                            | "type_id"
+                            | "type_id" => is_const_fn = Some(def_id),
+                            // END(DANGER_ZONE)
+
+                            // If you add anything to this list, make sure to also implement it
+                            // in `rustc_mir::interpret::const_eval`
                             | "bswap"
                             | "ctpop"
                             | "cttz"
                             | "cttz_nonzero"
                             | "ctlz"
-                            | "ctlz_nonzero" => is_const_fn = Some(def_id),
+                            | "ctlz_nonzero" => {
+                                self.add(Qualif::NOT_PROMOTABLE);
+                                is_const_fn = Some(def_id)
+                            },
 
                             name if name.starts_with("simd_shuffle") => {
                                 is_shuffle = true;
@@ -933,6 +949,11 @@ This does not pose a problem by itself because they can't be accessed directly."
                     _ => {
                         if self.tcx.is_const_fn(def_id) {
                             is_const_fn = Some(def_id);
+                            if def_id != self.def_id {
+                                if !PromotableConstFn::is_promotable(self.tcx, def_id) {
+                                    self.add(Qualif::NOT_PROMOTABLE);
+                                }
+                            }
                         }
                     }
                 }
@@ -1191,7 +1212,13 @@ fn mir_const_qualif<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         return (Qualif::NOT_CONST.bits(), Lrc::new(IdxSetBuf::new_empty(0)));
     }
 
-    let mut qualifier = Qualifier::new(tcx, def_id, mir, Mode::Const);
+    let mode = if tcx.is_const_fn(def_id) {
+        Mode::ConstFn
+    } else {
+        Mode::Const
+    };
+
+    let mut qualifier = Qualifier::new(tcx, def_id, mir, mode);
     let (qualif, promoted_temps) = qualifier.qualify_const();
     (qualif.bits(), promoted_temps)
 }
@@ -1239,7 +1266,7 @@ impl MirPass for QualifyAndPromoteConstants {
                 let mut qualifier = Qualifier::new(tcx, def_id, mir, mode);
                 if mode == Mode::ConstFn {
                     // Enforce a constant-like CFG for `const fn`.
-                    qualifier.qualify_const();
+                    tcx.mir_const_qualif(def_id);
                 } else {
                     while let Some((bb, data)) = qualifier.rpo.next() {
                         qualifier.visit_basic_block_data(bb, data);
@@ -1322,4 +1349,206 @@ fn args_required_const(tcx: TyCtxt, def_id: DefId) -> Option<FxHashSet<usize>> {
         }
     }
     Some(ret)
+}
+
+// `root` is a const fn, check whether it can be promoted
+struct PromotableConstFn<'a, 'tcx: 'a> {
+    tcx: TyCtxt<'a, 'tcx, 'tcx>,
+    remaining: Vec<DefId>,
+    seen: FxHashSet<DefId>,
+}
+
+impl<'a, 'tcx> PromotableConstFn<'a, 'tcx> {
+    fn is_promotable(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId) -> bool {
+        let mut checker = PromotableConstFn {
+            remaining: vec![def_id],
+            seen: FxHashSet(),
+            tcx,
+        };
+        checker.seen.insert(def_id);
+        while let Some(def_id) = checker.remaining.pop() {
+            if !checker.check_mir(def_id) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn check_later(&mut self, def_id: DefId) {
+        if self.seen.insert(def_id) {
+            self.remaining.push(def_id);
+        }
+    }
+
+    fn check_qualifs(&self, def_id: DefId, span: Span) -> bool {
+        let (bits, _) = self.tcx.at(span).mir_const_qualif(def_id);
+
+        !Qualif::from_bits(bits).expect("invalid mir_const_qualif").contains(Qualif::NOT_PROMOTABLE)
+    }
+
+    fn check_mir(&mut self, def_id: DefId) -> bool {
+        if def_id.is_local() {
+            match &*self.tcx.mir_const(def_id).try_borrow() {
+                Some(mir) => mir.basic_blocks().iter().all(|bb| self.check_bb(&mir, &bb)),
+                // mir_const_qualif has already been executed for this MIR,
+                // so we don't have to recurse, we just fetch the cache value
+                // also we can't recurse, because the `mir_const` MIR has been stolen
+                None => self.check_qualifs(def_id, self.tcx.def_span(def_id)),
+            }
+        } else {
+            // dependencies are already cached
+            self.check_qualifs(def_id, self.tcx.def_span(def_id))
+        }
+    }
+    fn check_bb(&mut self, mir: &Mir<'tcx>, bb: &BasicBlockData<'tcx>) -> bool {
+        bb.statements.iter().all(|stmt| self.check_statement(mir, stmt)) &&
+        bb.terminator.as_ref().map_or(true, |t| self.check_terminator_kind(mir, &t.kind))
+    }
+    fn check_terminator_kind(
+        &mut self,
+        mir: &Mir<'tcx>,
+        kind: &TerminatorKind<'tcx>,
+    ) -> bool {
+        match kind {
+            TerminatorKind::Call { ref func, ref args, destination: Some((dest, _)), .. } => {
+                let fn_ty = func.ty(mir, self.tcx);
+                if let ty::TyFnDef(def_id, _) = fn_ty.sty {
+                    if self.tcx.is_const_fn(def_id) {
+                        self.check_later(def_id);
+                        args.iter().all(|op| self.check_operand(mir, op)) &&
+                            self.check_place(mir, dest)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
+            // trivial constrol flow
+            TerminatorKind::Goto { .. } |
+            TerminatorKind::Return => true,
+            // everything else is not promotable
+            _ => false,
+        }
+    }
+
+    fn check_operand(
+        &mut self,
+        mir: &Mir<'tcx>,
+        operand: &Operand<'tcx>,
+    ) -> bool {
+        match operand {
+            Operand::Copy(place) | Operand::Move(place) => self.check_place(mir, place),
+            Operand::Constant(c) => self.check_constant(c),
+        }
+    }
+
+    fn check_constant(
+        &mut self,
+        constant: &Constant<'tcx>,
+    ) -> bool {
+        match constant.literal {
+            Literal::Value { value: &ty::Const { val, .. } } => {
+                match val {
+                    ConstVal::Unevaluated(def_id, _) => {
+                        // Don't peek inside trait associated constants.
+                        self.tcx.trait_of_item(def_id).is_none() &&
+                            self.check_qualifs(def_id, constant.span)
+                    }
+                    // This seems not quite right. When are constants evaluated?
+                    // We can't really check through evaluated constants
+                    ConstVal::Value(_) => true,
+                }
+            },
+            Literal::Promoted { .. } => true,
+        }
+    }
+
+    fn check_statement(
+        &mut self,
+        mir: &Mir<'tcx>,
+        stmt: &Statement<'tcx>,
+    ) -> bool {
+        match &stmt.kind {
+            StatementKind::Assign(place, rvalue) => {
+                self.check_place(mir, place) && self.check_rvalue(mir, rvalue)
+            },
+            StatementKind::ReadForMatch(place) |
+            StatementKind::SetDiscriminant { place, .. } => self.check_place(mir, place),
+            StatementKind::Validate(..) | StatementKind::EndRegion(_) |
+            StatementKind::UserAssertTy(..) | StatementKind::Nop |
+            StatementKind::StorageLive(_) | StatementKind::StorageDead(_) => true,
+            StatementKind::InlineAsm { .. } => false,
+        }
+    }
+
+    fn check_rvalue(
+        &mut self,
+        mir: &Mir<'tcx>,
+        rvalue: &Rvalue<'tcx>,
+    ) -> bool {
+        match rvalue {
+            | Rvalue::Use(op)
+            | Rvalue::Repeat(op, _)
+            => self.check_operand(mir, op),
+
+            Rvalue::NullaryOp(..) => true,
+
+            // disallow anything that processes the bits of a value
+            | Rvalue::UnaryOp(_, _)
+            | Rvalue::Len(_)
+            | Rvalue::Discriminant(_)
+            | Rvalue::BinaryOp(_, _, _)
+            | Rvalue::CheckedBinaryOp(_, _, _)
+            => false,
+
+            | Rvalue::Ref(_, _, place)
+            => self.check_place(mir, place),
+
+            | Rvalue::Aggregate(_, operands)
+            => operands.iter().any(|op| self.check_operand(mir, op)),
+
+            | Rvalue::Cast(CastKind::ReifyFnPointer, op, _)
+            | Rvalue::Cast(CastKind::UnsafeFnPointer, op, _)
+            | Rvalue::Cast(CastKind::ClosureFnPointer, op, _)
+            | Rvalue::Cast(CastKind::Unsize, op, _)
+            => self.check_operand(mir, op),
+
+            Rvalue::Cast(CastKind::Misc, operand, cast_ty) => {
+                let operand_ty = operand.ty(mir, self.tcx);
+                let cast_in = CastTy::from_ty(operand_ty).expect("bad input type for cast");
+                let cast_out = CastTy::from_ty(cast_ty).expect("bad output type for cast");
+                match (cast_in, cast_out) {
+                    (CastTy::Ptr(_), CastTy::Int(_)) |
+                    (CastTy::FnPtr, CastTy::Int(_)) => false,
+                    _ => self.check_operand(mir, operand)
+                }
+            }
+        }
+    }
+
+    fn check_place(
+        &mut self,
+        mir: &Mir<'tcx>,
+        place: &Place<'tcx>,
+    ) -> bool {
+        match place {
+            Place::Projection(proj) => self.check_place(mir, &proj.base) && match proj.elem {
+                ProjectionElem::Field(..) => {
+                    // accessing union fields is never allowed inside promoteds
+                    match proj.base.ty(mir, self.tcx).to_ty(self.tcx).ty_adt_def() {
+                        Some(def) => !def.is_union(),
+                        None => true,
+                    }
+                },
+                | ProjectionElem::ConstantIndex { .. }
+                | ProjectionElem::Deref
+                | ProjectionElem::Index(_)
+                | ProjectionElem::Subslice { .. }
+                | ProjectionElem::Downcast(..) => true,
+            },
+            Place::Local(_) => true,
+            Place::Static(_) => false,
+        }
+    }
 }

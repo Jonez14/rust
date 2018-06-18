@@ -827,6 +827,7 @@ impl<'a, 'b: 'a, 'tcx: 'b> IsolatedEncoder<'a, 'b, 'tcx> {
                         constness: hir::Constness::NotConst,
                         arg_names,
                         sig: self.lazy(&tcx.fn_sig(def_id)),
+                        qualif: None,
                     }
                 } else {
                     bug!()
@@ -880,6 +881,20 @@ impl<'a, 'b: 'a, 'tcx: 'b> IsolatedEncoder<'a, 'b, 'tcx> {
         !self.tcx.sess.opts.output_types.should_codegen()
     }
 
+    fn const_fn_qualif(
+        &self,
+        def_id: DefId,
+        body_id: hir::BodyId,
+        span: Span,
+    ) -> Option<ConstQualif> {
+        if self.tcx.is_const_fn(def_id) {
+            let mir = self.tcx.at(span).mir_const_qualif(def_id).0;
+            Some(self.const_qualif(mir, body_id))
+        } else {
+            None
+        }
+    }
+
     fn const_qualif(&self, mir: u8, body_id: hir::BodyId) -> ConstQualif {
         let body_owner_def_id = self.tcx.hir.body_owner_def_id(body_id);
         let ast_promotable = self.tcx.const_is_rvalue_promotable_to_static(body_owner_def_id);
@@ -915,11 +930,12 @@ impl<'a, 'b: 'a, 'tcx: 'b> IsolatedEncoder<'a, 'b, 'tcx> {
                 }
             }
             ty::AssociatedKind::Method => {
-                let fn_data = if let hir::ImplItemKind::Method(ref sig, body) = ast_item.node {
+                let fn_data = if let hir::ImplItemKind::Method(ref sig, body_id) = ast_item.node {
                     FnData {
                         constness: sig.constness,
-                        arg_names: self.encode_fn_arg_names_for_body(body),
+                        arg_names: self.encode_fn_arg_names_for_body(body_id),
                         sig: self.lazy(&tcx.fn_sig(def_id)),
+                        qualif: self.const_fn_qualif(def_id, body_id, ast_item.span),
                     }
                 } else {
                     bug!()
@@ -1045,13 +1061,13 @@ impl<'a, 'b: 'a, 'tcx: 'b> IsolatedEncoder<'a, 'b, 'tcx> {
                     self.encode_rendered_const_for_body(body_id)
                 )
             }
-            hir::ItemFn(_, _, constness, .., body) => {
+            hir::ItemFn(_, _, constness, .., body_id) => {
                 let data = FnData {
                     constness,
-                    arg_names: self.encode_fn_arg_names_for_body(body),
+                    arg_names: self.encode_fn_arg_names_for_body(body_id),
                     sig: self.lazy(&tcx.fn_sig(def_id)),
+                    qualif: self.const_fn_qualif(def_id, body_id, item.span),
                 };
-
                 EntryKind::Fn(self.lazy(&data))
             }
             hir::ItemMod(ref m) => {
@@ -1565,6 +1581,7 @@ impl<'a, 'b: 'a, 'tcx: 'b> IsolatedEncoder<'a, 'b, 'tcx> {
                     constness: hir::Constness::NotConst,
                     arg_names: self.encode_fn_arg_names(names),
                     sig: self.lazy(&tcx.fn_sig(def_id)),
+                    qualif: None,
                 };
                 EntryKind::ForeignFn(self.lazy(&data))
             }

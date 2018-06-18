@@ -210,6 +210,10 @@ fn mir_validated<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, def_id: DefId) -> &'tcx 
         // Ensure that we compute the `mir_const_qualif` for constants at
         // this point, before we steal the mir-const result.
         let _ = tcx.mir_const_qualif(def_id);
+    } else if tcx.is_const_fn(def_id) {
+        // Ensure that we compute the `mir_const_qualif` for const fns at
+        // this point, before we steal the mir-const result.
+        let _ = tcx.mir_const_qualif(def_id);
     }
 
     let mut mir = tcx.mir_const(def_id).steal();
